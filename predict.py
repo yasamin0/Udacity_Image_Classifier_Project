@@ -1,125 +1,106 @@
-import os
-import torch
-from PIL import Image
-import matplotlib.pyplot as plt
-from torch import nn, optim
-import numpy as np
+import argparse
 import json
-from torchvision import datasets, transforms, models
-from collections import OrderedDict
-from get_input_args import get_input_args_predict, validate_predict_args
+import PIL
+import torch
+import numpy as np
+from math import ceil
+from train import check_gpu
+from torchvision import models
 
-# Pre-trained models available
-pretrained_models = {
-    'alexnet': models.alexnet(pretrained=True),
-    'vgg16': models.vgg16(pretrained=True),
-}
+def arg_parser():
+    parser = argparse.ArgumentParser(description="predict.py")
+    parser.add_argument('--image',type=str,help='Point to impage file for prediction.',required=True)
+    parser.add_argument('--checkpoint',type=str,help='Point to checkpoint file as str.',required=True)
+    parser.add_argument('--top_k',type=int,help='Choose top K matches as int.')
+    parser.add_argument('--category_names', dest="category_names", action="store", default='cat_to_name.json')
+    parser.add_argument('--gpu', default="gpu", action="store", dest="gpu")
 
-def load_pretrained_model(model_name='vgg16'):
-    """
-    Retrieves a pre-trained model based on the specified architecture name.
-    """
-    try:
-        return pretrained_models[model_name]
-    except KeyError:
-        print(f"Model {model_name} is not available.")
-        return None
+    args = parser.parse_args()
+    
+    return args
 
-def map_categories_to_names(file_path='cat_to_name.json'):
-    """
-    Maps category indices to class names using a JSON file.
-    """
-    with open(file_path, 'r') as f:
-        return json.load(f)
 
 def load_checkpoint(checkpoint_path):
-    """
-    Loads a model checkpoint and rebuilds the model with its saved parameters.
-    """
-    try:
-        checkpoint = torch.load(checkpoint_path)
-        print(f"Loaded model architecture: {checkpoint['model_name']}")
+    
+    checkpoint = torch.load("checkpoint.pth")
+    
+     model = models.vgg16(pretrained=True)
+        model.name = "vgg16"
+    
+    
+    
+    for param in model.parameters(): 
+        param.requires_grad = False
+    
+    # Load from checkpoint
+    model.class_to_idx = checkpoint['class_to_idx']
+    model.classifier = checkpoint['classifier']
+    model.load_state_dict(checkpoint['state_dict'])
+    
+    return model
 
-        model = load_pretrained_model(checkpoint['model_name'])
-        if model:
-            model.load_state_dict(checkpoint['model_state_dict'])
-            model.classifier = checkpoint['classifier']
-            model.class_to_idx = checkpoint['class_to_idx']
+def process_image(image):
+    img = PIL.Image.open(image)
 
-            for param in model.parameters():
-                param.requires_grad = False
-            return model
-        else:
-            raise ValueError("Model architecture not recognized.")
-    except Exception as e:
-        print(f"Error loading checkpoint: {e}")
-        return None
+    original_width, original_height = img.size
+    
+    if original_width < original_height:
+        size=[256, 256**600]
+    else: 
+        size=[256**600, 256]
+        
+    img.thumbnail(size)
+   
+    center = original_width/4, original_height/4
+    left, top, right, bottom = center[0]-(244/2), center[1]-(244/2), center[0]+(244/2), center[1]+(244/2)
+    img = img.crop((left, top, right, bottom))
 
-def preprocess_image(image_path):
-    """
-    Prepares an image for input into the model: resizing, cropping, and normalizing.
-    """
-    transform_pipeline = transforms.Compose([
-        transforms.Resize((224, 224)),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-    ])
-    with Image.open(image_path) as image:
-        return transform_pipeline(image)
+    numpy_img = np.array(img)/255 
 
-def make_prediction(image_path, model, top_k=5):
-    """
-    Predicts the top K classes for a given image using a trained model.
-    """
-    image_tensor = preprocess_image(image_path).unsqueeze(0)
-    model.eval()
-    with torch.no_grad():
-        outputs = model(image_tensor)
-        probabilities = torch.softmax(outputs, dim=1)
-        top_probs, top_indices = probabilities.topk(top_k)
+    # Normalize each color channel
+    mean = [0.485, 0.456, 0.406]
+    std = [0.229, 0.224, 0.225]
+    numpy_img = (numpy_img-mean)/std
+        
+    # Set the color to the first channel
+    numpy_img = numpy_img.transpose(2, 0, 1)
+    
+    return numpy_img
 
-    # Convert indices to class labels
-    idx_to_class = {idx: cls for cls, idx in model.class_to_idx.items()}
-    top_classes = [idx_to_class[idx] for idx in top_indices.squeeze().tolist()]
-    return top_probs.squeeze().tolist(), top_classes
+ach())[0]
+    
+    # Convert to classes
+    idx_to_class = {val: key for key, val in    
+                                      model.class_to_idx.items()}
+    top_labels = [idx_to_class[lab] for lab in top_labels]
+    top_flowers = [cat_to_name[lab] for lab in top_labels]
+    
+    return top_probs, top_labels, top_flowers
 
-def display_image_with_predictions(image, probabilities, classes, class_labels):
-    """
-    Displays the image along with the top predicted classes and their probabilities.
-    """
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(6, 9))
-    image_np = image.numpy().transpose((1, 2, 0))
-    ax1.imshow(np.clip(image_np, 0, 1))
-    ax1.axis('off')
 
-    ax2.barh(range(len(classes)), probabilities)
-    ax2.set_yticks(range(len(classes)))
-    ax2.set_yticklabels([class_labels.get(cls, "Unknown") for cls in classes])
-    ax2.set_xlim(0, 1.1)
-    ax1.set_title(class_labels.get(classes[0], "Unknown"))
+def print_probability(probs, flowers):
+    #Converts two lists into a dictionary to print on screen
+    for i, j in enumerate(zip(flowers, probs)):
+        print ("Rank {}:".format(i+1),
+               "Flower: {}, liklihood: {}%".format(j[1], ceil(j[0]*100)))
 
-    plt.tight_layout()
-    plt.show()
 
 def main():
-    """
-    Main function to load the model, process the image, and display predictions.
-    """
-    args = get_input_args_predict()
-    validate_predict_args(args)
+    
+    args = arg_parser()
+    
+    with open(args.category_names, 'r') as f:
+        	cat_to_name = json.load(f)
 
-    print("Loading model...")
     model = load_checkpoint(args.checkpoint)
-    if not model:
-        print("Model could not be loaded. Exiting...")
-        return
+    
+    image_tensor = process_image(args.image)
+    
+    device = check_gpu(gpu_arg=args.gpu);
+    
+    top_probs, top_labels, top_flowers = predict(image_tensor, model,device, cat_to_name,args.top_k)
+    
+    
+    print_probability(top_flowers, top_probs)
 
-    image_path = args.image_dir
-    top_k = int(args.top_k) if args.top_k else 5
-    probabilities, classes = make_prediction(image_path, model, top_k)
-
-    class_labels = map_categories_to_names()
-    display_image_with_predictions(preprocess_image(image_path), probabilities, classes, class_labels)
-
-if __name__ == '__main__':
-    main()
+if __name__ == '__main__': main()
